@@ -14,6 +14,10 @@ app.get('/manifest.json', (req, res) => {
     ...addonInterface.manifest,
     logo: `${protocol}://${host}/assets/icons/logo.png`
   };
+  // Fork fix: Stremio Web runs in a browser, so the manifest response must
+  // allow cross-origin reads. Without this header the web client fails with
+  // "Failed to fetch" while native apps (no CORS enforcement) work fine.
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.end(JSON.stringify(manifest));
 });
