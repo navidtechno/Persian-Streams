@@ -4,7 +4,7 @@ import addonModule from './addon.js';
 // CommonJS module into the Worker, so use a normal static import instead of
 // createRequire(import.meta.url), which has no usable file URL in Workers.
 
-const { manifest, getStreams, setBaseUrl, getBaseUrl } = addonModule;
+const { manifest, get, getStreams, setBaseUrl, getBaseUrl } = addonModule;
 
 function debugLog(scope, message, data) {
   if (data !== undefined) {
@@ -35,6 +35,21 @@ function withAbsoluteLogo(request) {
 
 function parseStreamRequest(pathname) {
   const match = pathname.match(/^(?:\/streams)?\/stream\/(movie|series)\/(.+?)(?:\.json)?\/?$/);
+  if (!match) return null;
+
+  try {
+    return {
+      type: match[1],
+      id: decodeURIComponent(match[2]),
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+// Fork addition: /streams/catalog/:type/:id.json (extra via query string)
+function parseCatalogRequest(pathname) {
+  const match = pathname.match(/^(?:\/streams)?\/catalog\/(movie|series)\/(.+?)(?:\.json)?\/?$/);
   if (!match) return null;
 
   try {
@@ -193,6 +208,21 @@ export default {
     const streamRequest = parseStreamRequest(pathname);
     if (streamRequest && request.method === 'GET') {
       return handleStream(streamRequest, request.url);
+    }
+
+    // Fork addition: catalog route (extra params come as query string).
+    const catalogRequest = parseCatalogRequest(pathname);
+    if (catalogRequest && request.method === 'GET') {
+      try {
+        const extra = {};
+        if (url.searchParams.has('search')) extra.search = url.searchParams.get('search');
+        if (url.searchParams.has('skip')) extra.skip = url.searchParams.get('skip');
+        const resp = await get('catalog', catalogRequest.type, catalogRequest.id, extra);
+        return json(resp);
+      } catch (e) {
+        console.error('[WORKER] catalog error', e.message);
+        return json({ metas: [] });
+      }
     }
 
     debugLog('WORKER', `404 not found`, { pathname });

@@ -480,3 +480,20 @@ Pull Requestها و Issueها برای بهبود استخراج لینک، سا
   ساخته شده با ❤️ برای جامعه فارسی‌زبان Stremio<br />
   حمایت از ادامه مسیر: <a href="https://alirostami.com/support">alirostami.com/support</a>
 </p>
+
+---
+
+## Fork: Persian Streams Catalog (v1.3.0)
+
+فورک با قابلیت کاتالوگ، تا عنوان‌ها در صفحه‌ی Home و Discover استرمیو هم دیده شوند:
+
+- دو کاتالوگ «تازه‌های فیلم» و «تازه‌های سریال» (تازه‌ترین‌های ارائه‌دهنده، با جست‌وجو و صفحه‌بندی)
+- پخش (stream) بدون تغییر از نسخه‌ی اصلی
+- رفع باگ سرور Node نسخه‌ی اصلی: خروجی `addon.js` حالا `manifest` و `get` واقعی را اکسپورت می‌کند تا `server.js` با SDK رسمی کار کند
+- پشتیبانی از پروکسی محیطی (`https_proxy` و غیره) برای axios، فقط وقتی این متغیرها تنظیم شده باشند؛ در محیط مستقیم (مثل Render) رفتاری عوض نمی‌شود
+
+### اجرای Node (Render)
+
+- Build Command: `npm install`
+- Start Command: `node server.js`
+- متغیر محیطی لازم نیست؛ `BASE_URL` به‌صورت پیش‌فرض روی ارائه‌دهنده‌ی اصلی تنظیم است. لینک نصب: `https://<your-service>.onrender.com/manifest.json`

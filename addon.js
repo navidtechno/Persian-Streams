@@ -55,6 +55,27 @@ function sanitizeUrlForLog(url) {
   }
 }
 
+// Sandbox/proxied environments: axios does not read proxy env vars on its
+// own, so configure it explicitly when they are set. Direct environments
+// (e.g. Render) have no proxy vars and are unaffected.
+function axiosProxyFor(targetUrl) {
+  const raw = process.env.https_proxy || process.env.HTTPS_PROXY || process.env.http_proxy || process.env.HTTP_PROXY;
+  if (!raw) return undefined;
+  let targetHost = '';
+  try { targetHost = new URL(targetUrl).hostname; } catch { return undefined; }
+  const noProxy = (process.env.no_proxy || process.env.NO_PROXY || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (noProxy.some((entry) => entry === '*' || targetHost === entry || targetHost.endsWith('.' + entry))) return undefined;
+  try {
+    const u = new URL(raw);
+    if (!u.hostname || !u.port) return undefined;
+    const proxy = { protocol: (u.protocol || 'http:').replace(':', ''), host: u.hostname, port: Number(u.port) };
+    if (u.username) proxy.auth = { username: decodeURIComponent(u.username), password: decodeURIComponent(u.password) };
+    return proxy;
+  } catch { return undefined; }
+}
+
+const PROXY = axiosProxyFor(BASE_URL);
+
 // Create axios instance with proper headers
 let client = axios.create({
   baseURL: BASE_URL,
@@ -65,7 +86,8 @@ let client = axios.create({
   },
   timeout: 15000,
   maxRedirects: 5,
-  validateStatus: status => status < 500
+  validateStatus: status => status < 500,
+  ...(PROXY ? { proxy: PROXY } : {}),
 });
 
 function setBaseUrl(newBaseUrl) {
@@ -88,14 +110,17 @@ const LOGO = '/assets/icons/logo.png';
 
 // Initialize addon builder with manifest
 const builder = new addonBuilder({
-  id: 'org.alirostami.streams.persian',
-  name: 'Persian Streams',
-  description: 'Fast streaming links from Iranian media providers with Persian subtitles and audio.\n\nAuthor: Ali Rostami  \nWebsite: alirostami.com/support \nGitHub: https://github.com/alirostami01/Persian-Streams/',
-  version: '1.2.0',
-  resources: ['stream'],
+  id: 'community.persian-streams-catalog',
+  name: 'Persian Streams Catalog',
+  description: 'Fast streaming links from Iranian media providers with Persian subtitles and audio.\n\nAuthor: Ali Rostami  \nWebsite: alirostami.com/support \nGitHub: https://github.com/alirostami01/Persian-Streams/\n\nFork: catalog support added (latest + search) so titles appear on the Stremio home screen.',
+  version: '1.3.0',
+  resources: ['stream', 'catalog'],
   types: ['movie', 'series'],
   idPrefixes: ['tt'],
-  catalogs: [],
+  catalogs: [
+    { type: 'movie', id: 'persian-latest-movies', name: 'تازه‌های فیلم', extra: [{ name: 'search' }, { name: 'skip' }] },
+    { type: 'series', id: 'persian-latest-series', name: 'تازه‌های سریال', extra: [{ name: 'search' }, { name: 'skip' }] },
+  ],
   contactEmail: 'rostami.ali@gmail.com',
   author: 'Ali Rostami rostami.ali@gmail.com',
   logo: LOGO
@@ -108,7 +133,7 @@ async function fetchTitleFromMeta(type, imdbId) {
   try {
     // Stremio meta endpoint format: https://v3-cinemeta.strem.io/meta/<type>/<imdbId>.json
     const metaUrl = `https://v3-cinemeta.strem.io/meta/${type}/${imdbId}.json`;
-    const response = await axios.get(metaUrl, {
+    const response = await client.get(metaUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       },
@@ -667,7 +692,7 @@ async function extractStreamsFromSeasonDirectory(seasonUrl, targetSeason, target
 
   try {
     debugLog('LEGACY', `Fetching legacy season directory: ${sanitizeUrlForLog(seasonUrl)}`);
-    const response = await axios.get(seasonUrl, {
+    const response = await client.get(seasonUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
@@ -1090,8 +1115,78 @@ builder.defineStreamHandler((args) => {
   return getStreams(type, imdbId, season, episode);
 });
 
+// ---- catalog (fork addition) ------------------------------------------------
+// The provider's quick-search doubles as a catalog source:
+//  - empty query + sort=modified_at:desc returns the most recently updated posts
+//  - any query searches titles
+// Items carry imdb_id, title (may contain <em>), title_fa, image, year and
+// a /series/ URL prefix for series. Catalog metas use the IMDb id so the
+// existing stream handler resolves them.
+const CATALOG_LIMIT = 50;
+const CATALOG_CACHE_TTL = 5 * 60 * 1000;
+let latestCache = null;
+
+function stripTags(s) {
+  return String(s || '').replace(/<[^>]*>/g, '').trim();
+}
+
+function toCatalogMeta(item, type) {
+  if (!item || item._kind !== 'post' || !item.imdb_id) return null;
+  const isSeries = String(item.url || '').startsWith('/series/');
+  if (type === 'series' ? !isSeries : isSeries) return null;
+  const name = stripTags(item.title || item.name) || stripTags(item.title_fa);
+  if (!name) return null;
+  const image = item.image
+    ? (String(item.image).startsWith('http') ? item.image : `${BASE_URL.replace(/\/$/, '')}${item.image}`)
+    : undefined;
+  return {
+    id: String(item.imdb_id),
+    type,
+    name,
+    poster: image,
+    releaseInfo: item.year ? String(item.year) : undefined,
+    description: stripTags(item.title_fa) || undefined,
+  };
+}
+
+async function quickSearchCatalog(query) {
+  const response = await client.get(`/quick-search?q=${encodeURIComponent(query)}&sort=modified_at%3Adesc&limit=${CATALOG_LIMIT}`);
+  const data = response.data;
+  const results = Array.isArray(data) ? data : (data && (data.data || data.results)) || [];
+  return Array.isArray(results) ? results : [];
+}
+
+async function latestCatalogItems() {
+  if (latestCache && Date.now() - latestCache.t < CATALOG_CACHE_TTL) return latestCache.items;
+  const items = await quickSearchCatalog('');
+  latestCache = { t: Date.now(), items };
+  return items;
+}
+
+builder.defineCatalogHandler(async ({ type, extra }) => {
+  try {
+    const skip = Number((extra && extra.skip) || 0) || 0;
+    const items = extra && extra.search
+      ? await quickSearchCatalog(String(extra.search))
+      : await latestCatalogItems();
+    const seen = new Set();
+    const metas = [];
+    for (const item of items) {
+      const meta = toCatalogMeta(item, type);
+      if (!meta || seen.has(meta.id)) continue;
+      seen.add(meta.id);
+      metas.push(meta);
+    }
+    return { metas: metas.slice(skip, skip + 20) };
+  } catch (e) {
+    console.error('[catalog]', e.message);
+    return { metas: [] };
+  }
+});
+
 module.exports = {
-  manifest: builder.manifest,
+  manifest: builder.getInterface().manifest,
+  get: builder.getInterface().get,
   getStreams,
   setBaseUrl,
   getBaseUrl,
